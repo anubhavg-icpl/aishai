@@ -1,7 +1,10 @@
 # aishai — Music Genre Fingerprinter
 
 <p align="center">
-  <img src="assets/Design_a_modern,_tech-inspired_logo_202604291359.png" alt="aishai logo — SPECTRUM → ICA → KMEANS" width="700"/>
+  <picture>
+    <source srcset="assets/logo.avif" type="image/avif"/>
+    <img src="assets/Design_a_modern,_tech-inspired_logo_202604291359.png" alt="aishai logo — SPECTRUM → ICA → KMEANS" width="700"/>
+  </picture>
 </p>
 
 <p align="center">
@@ -1303,7 +1306,10 @@ The overlap matters more for short files (fewer frames total) where each frame c
 ## 14. Pipeline Infographic
 
 <p align="center">
-  <img src="assets/i_needed_a_proper_just_202604291357.png" alt="aishai pipeline infographic" width="700"/>
+  <picture>
+    <source srcset="assets/pipeline.avif" type="image/avif"/>
+    <img src="assets/i_needed_a_proper_just_202604291357.png" alt="aishai pipeline infographic" width="700"/>
+  </picture>
 </p>
 
 The pipeline can also be visualized as a data transformation chain:
