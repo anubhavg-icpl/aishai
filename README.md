@@ -46,6 +46,7 @@
    - [Step 10 — Cluster Dominant Band](#710-step-10--cluster-dominant-band)
 8. [Complete Example Output](#8-complete-example-output)
 9. [Understanding the Output](#9-understanding-the-output)
+   - [The `[ok]` Line](#90-the-ok-line)
    - [The Band Bar Chart](#91-the-band-bar-chart)
    - [Per-File Dominant Band](#92-per-file-dominant-band)
    - [Cluster Results Block](#93-cluster-results-block)
@@ -153,7 +154,7 @@ The result is a compact, interpretable "fingerprint" of each audio file and a be
 ### Prerequisites
 
 - **Rust toolchain** (stable, edition 2024). Install from [rustup.rs](https://rustup.rs).
-- WAV files placed in `data/` (any sample rate, mono or stereo, 16/24/32-bit int or 32-bit float).
+- WAV files placed in `data/` (any sample rate, mono or stereo, 8/16/24/32-bit int or 32-bit float).
 
 ### Build and Run
 
@@ -180,7 +181,8 @@ cargo build --release
 Drop any `.wav` files into `data/`. They can be:
 - Any sample rate (44.1 kHz, 48 kHz, 96 kHz all work).
 - Mono or stereo (stereo is automatically mixed to mono).
-- Any bit depth: 16-bit int, 24-bit int, 32-bit int, or 32-bit float.
+- Any bit depth: **8, 16, 24, or 32-bit integer PCM**, or **32-bit float**.
+  - 64-bit float WAV is not supported. Convert first: `ffmpeg -i input.wav -acodec pcm_f32le output.wav`
 - Any duration (minimum ~46 ms at 44.1 kHz to yield at least one 2048-sample frame).
 
 Files shorter than 2048 samples are skipped with a `[skip]` message.
@@ -196,10 +198,10 @@ aishai/
 ├── README.md                           # This file
 │
 ├── assets/
-│   ├── Design_a_modern,_tech-inspired_logo_202604291359.png
-│   │   └── Hero banner: "SPECTRUM → ICA → KMEANS" logo
-│   └── i_needed_a_proper_just_202604291357.png
-│       └── Pipeline infographic diagram
+│   ├── Design_a_modern,_tech-inspired_logo_202604291359.png   # hero banner (PNG fallback)
+│   ├── logo.avif                                              # hero banner (AVIF, ~96% smaller)
+│   ├── i_needed_a_proper_just_202604291357.png                # pipeline infographic (PNG fallback)
+│   └── pipeline.avif                                          # pipeline infographic (AVIF)
 │
 ├── data/                               # Drop your .wav files here
 │   ├── car-horn.wav                    # 48kHz, Nissan Leaf electric horn
@@ -297,8 +299,9 @@ For each WAV file:
 1. Calls `audio::load_wav()` → `AudioFile` (name, mono samples, sample rate).
 2. Calls `audio::frames()` → list of 2048-sample overlapping windows.
 3. Calls `features::file_features()` → `[f32; 8]` average band energies.
-4. Generates a bar string and prints the `[ok]` line.
-5. Accumulates file name and feature vector for the pipeline.
+4. Generates a band bar string and determines the per-file dominant band.
+5. Prints the `[ok]` line: name (24-column unicode-padded), sample rate in kHz, bit depth, channel label (`mono`, `stereo`, or `multi`), band bar, dominant band.
+6. Accumulates file name and feature vector for the pipeline.
 
 Files that fail to load are printed as `[err]` with the error message and skipped. Files too short (< 2048 samples) are printed as `[skip]`.
 
@@ -320,25 +323,48 @@ Iterates over cluster indices 0..k. For each cluster, collects members by matchi
 
 This module handles everything before spectral analysis: reading bytes off disk, normalizing sample format, and chunking the signal into analysis frames.
 
-#### `AudioFile` struct (lines 4–8)
+#### `AudioFile` struct
 
 ```rust
 pub struct AudioFile {
     pub name: String,
     pub samples: Vec<f32>,
     pub sample_rate: u32,
+    pub channels: u16,   // original channel count before mixdown
+    pub bit_depth: u16,  // bits per sample from the WAV spec
 }
 ```
 
-A lightweight owned container. `name` is the filename (not the full path), `samples` is the complete mono signal normalized to `[-1.0, 1.0]`, and `sample_rate` is needed by the FFT stage to map bin indices to Hz.
+A lightweight owned container. `name` is the filename (not the full path), `samples` is the complete mono signal normalized to `[-1.0, 1.0]`, and `sample_rate` is needed by the FFT stage to map bin indices to Hz. `channels` and `bit_depth` are carried through to the display layer so the `[ok]` line can show accurate file metadata.
 
-#### `load_wav()` (lines 10–49)
+#### `load_wav()`
 
 ```rust
 pub fn load_wav(path: &Path) -> anyhow::Result<AudioFile>
 ```
 
-Uses `hound::WavReader` which handles all RIFF/WAVE header parsing. The function supports two WAV sample formats:
+Uses `hound::WavReader` which handles all RIFF/WAVE header parsing. The function includes explicit format guards before decoding:
+
+**64-bit float guard** — bails early with a helpful ffmpeg conversion hint:
+```rust
+if spec.sample_format == SampleFormat::Float && spec.bits_per_sample == 64 {
+    anyhow::bail!(
+        "64-bit float WAV not supported — convert with ffmpeg:\n  \
+         ffmpeg -i \"{}\" -acodec pcm_f32le output.wav",
+        path.display()
+    );
+}
+```
+
+**Unknown bit-depth guard** — only 8/16/24/32-bit integer PCM is accepted:
+```rust
+if !matches!(spec.bits_per_sample, 8 | 16 | 24 | 32) {
+    anyhow::bail!(
+        "unsupported bit depth {}. Supported: 8, 16, 24, 32-bit PCM; 32-bit float",
+        spec.bits_per_sample
+    );
+}
+```
 
 **Float WAV (32-bit float)**:
 ```rust
@@ -358,7 +384,9 @@ hound::SampleFormat::Int => {
         .collect()
 }
 ```
-The maximum positive integer value for `bits_per_sample` bits (e.g., 32767 for 16-bit) is computed as `2^(bits-1)`. Dividing each sample by this value maps the full int range to `[-1.0, 1.0]`. Reading as `i32` is safe for 8, 16, 24, and 32-bit ints because `hound` sign-extends smaller types.
+The maximum positive integer value for `bits_per_sample` bits (e.g., 32767 for 16-bit) is computed as `2^(bits-1)`. Dividing each sample by this value maps the full int range to `[-1.0, 1.0]`. Reading as `i32` is safe for all supported int widths because `hound` sign-extends narrower types.
+
+> **8-bit PCM note**: WAV 8-bit PCM stores unsigned bytes (0–255 with 128 = silence). Hound converts these to signed `i32` by subtracting 128 before returning them, so the value `0x00` → `-128` and `0xFF` → `+127`. The normalization divisor `1 << (8-1) = 128` is therefore correct — no special-casing needed.
 
 **Mono mixdown (lines 31–38)**:
 ```rust
@@ -863,65 +891,86 @@ Using original features preserves physical meaning: the dominant band name refle
 Running `cargo run` with the 12 included sample files and default `k=5`:
 
 ```
-╔══════════════════════════════════════════════════╗
-║         Music Genre Fingerprinter                ║
-║         WAV → FFT → ICA → KMeans                 ║
-╚══════════════════════════════════════════════════╝
+╔════════════════════════════════════════════════════════╗
+║               Music Genre Fingerprinter                ║
+║           WAV  ->  FFT  ->  ICA  ->  KMeans            ║
+╚════════════════════════════════════════════════════════╝
 
-Found 12 WAV file(s) in data/
-Bands: sub-bass bass low-mid mid upper-mid presence brilliance air
+  12 WAV file(s) found in data/
+  Bands:  sub-bass  bass  low-mid  mid  upper-mid  presence  brilliance  air
 
-  [ok]  car-horn.wav                 48000Hz  ▃▂█▁▂▁▁▁  [low-mid]
-  [ok]  collectathon.wav             44100Hz  █▅▃▁▁▁▁▁  [sub-bass]
-  [ok]  echomorph-hpf.wav            48000Hz  ▆█▃▂▁▂▂▁  [bass]
-  [ok]  echomorph-nohpf.wav          48000Hz  ▅█▄▂▁▁▁▁  [bass]
-  [ok]  fifths.wav                   48000Hz  ▁▁▁▂▃▅██  [air]
-  [ok]  gc.wav                       48000Hz  ▂█▄▂▁▁▁▁  [bass]
-  [ok]  noise.wav                    48000Hz  ████████  [sub-bass]
-  [ok]  overdrive.wav                48000Hz  ▁▁▁█▂▁▁▁  [mid]
-  [ok]  sine.wav                     48000Hz  ▁▁▁█▁▁▁▁  [mid]
-  [ok]  synth.wav                    48000Hz  █▁▁▂▂▂▂▂  [sub-bass]
-  [ok]  voice-note.wav               48000Hz  ▆█▃▂▁▁▁▁  [bass]
-  [ok]  voice.wav                    48000Hz  ▄██▂▂▁▁▁  [bass]
+  [ok]  car-horn.wav              48kHz  16b  mono    ▃▂█▁▂▁▁▁  [low-mid]
+  [ok]  collectathon.wav          44kHz  16b  stereo  █▅▃▁▁▁▁▁  [sub-bass]
+  [ok]  echomorph-hpf.wav         48kHz  16b  mono    ▆█▃▂▁▂▂▁  [bass]
+  [ok]  echomorph-nohpf.wav       48kHz  16b  mono    ▅█▄▂▁▁▁▁  [bass]
+  [ok]  fifths.wav                48kHz  16b  mono    ▁▁▁▂▃▅██  [air]
+  [ok]  gc.wav                    48kHz  16b  mono    ▂█▄▂▁▁▁▁  [bass]
+  [ok]  noise.wav                 48kHz  16b  mono    ████████  [sub-bass]
+  [ok]  overdrive.wav             48kHz  16b  mono    ▁▁▁█▂▁▁▁  [mid]
+  [ok]  sine.wav                  48kHz  16b  mono    ▁▁▁█▁▁▁▁  [mid]
+  [ok]  synth.wav                 48kHz  16b  mono    █▁▁▂▂▂▂▂  [sub-bass]
+  [ok]  voice-note.wav            48kHz  16b  mono    ▆█▃▂▁▁▁▁  [bass]
+  [ok]  voice.wav                 48kHz  16b  mono    ▄██▂▂▁▁▁  [bass]
 
-Running FastICA (8 components) → KMeans (k=5)...
+  FastICA (8 components)  ->  KMeans (k=5) ...
 
-╔══════════════════════════════════════════════════╗
-║                 CLUSTER RESULTS                  ║
-╠══════════════════════════════════════════════════╣
-║  Cluster  0  [cluster dominant:   sub-bass]      ║
-║  sub▁ bas▁ lmd▁ mid▁ umd▁ pre▁ bri▁ air▁         ║
-║    • noise.wav                  ████████  sub-bass║
-║                                                  ║
-║  Cluster  1  [cluster dominant:   sub-bass]      ║
-║  sub▁ bas▁ lmd▁ mid▁ umd▁ pre▁ bri▁ air▁         ║
-║    • collectathon.wav           █▅▃▁▁▁▁▁  sub-bass║
-║    • echomorph-hpf.wav          ▆█▃▂▁▂▂▁      bass║
-║    • fifths.wav                 ▁▁▁▂▃▅██       air║
-║    • sine.wav                   ▁▁▁█▁▁▁▁       mid║
-║    • synth.wav                  █▁▁▂▂▂▂▂  sub-bass║
-║    • voice.wav                  ▄██▂▂▁▁▁      bass║
-║                                                  ║
-║  Cluster  2  [cluster dominant:    low-mid]      ║
-║  sub▁ bas▁ lmd▁ mid▁ umd▁ pre▁ bri▁ air▁         ║
-║    • car-horn.wav               ▃▂█▁▂▁▁▁   low-mid║
-║                                                  ║
-║  Cluster  3  [cluster dominant:       bass]      ║
-║  sub▁ bas▁ lmd▁ mid▁ umd▁ pre▁ bri▁ air▁         ║
-║    • gc.wav                     ▂█▄▂▁▁▁▁      bass║
-║                                                  ║
-║  Cluster  4  [cluster dominant:       bass]      ║
-║  sub▁ bas▁ lmd▁ mid▁ umd▁ pre▁ bri▁ air▁         ║
-║    • echomorph-nohpf.wav        ▅█▄▂▁▁▁▁      bass║
-║    • overdrive.wav              ▁▁▁█▂▁▁▁       mid║
-║    • voice-note.wav             ▆█▃▂▁▁▁▁      bass║
-╚══════════════════════════════════════════════════╝
-Tip: `cargo run -- 3` to try k=3 clusters
+╔════════════════════════════════════════════════════════╗
+║                    CLUSTER  RESULTS                    ║
+╠════════════════════════════════════════════════════════╣
+║  Cluster  0  dominant:   sub-bass                      ║
+║    sub   bas   lmd   mid   umd   pre   bri   air       ║
+║  * noise.wav               ████████    sub-bass        ║
+║                                                        ║
+║  Cluster  1  dominant:   sub-bass                      ║
+║    sub   bas   lmd   mid   umd   pre   bri   air       ║
+║  * collectathon.wav        █▅▃▁▁▁▁▁    sub-bass        ║
+║  * echomorph-hpf.wav       ▆█▃▂▁▂▂▁        bass        ║
+║  * fifths.wav              ▁▁▁▂▃▅██         air        ║
+║  * sine.wav                ▁▁▁█▁▁▁▁         mid        ║
+║  * synth.wav               █▁▁▂▂▂▂▂    sub-bass        ║
+║  * voice.wav               ▄██▂▂▁▁▁        bass        ║
+║                                                        ║
+║  Cluster  2  dominant:    low-mid                      ║
+║    sub   bas   lmd   mid   umd   pre   bri   air       ║
+║  * car-horn.wav            ▃▂█▁▂▁▁▁     low-mid        ║
+║                                                        ║
+║  Cluster  3  dominant:       bass                      ║
+║    sub   bas   lmd   mid   umd   pre   bri   air       ║
+║  * gc.wav                  ▂█▄▂▁▁▁▁        bass        ║
+║                                                        ║
+║  Cluster  4  dominant:       bass                      ║
+║    sub   bas   lmd   mid   umd   pre   bri   air       ║
+║  * echomorph-nohpf.wav     ▅█▄▂▁▁▁▁        bass        ║
+║  * overdrive.wav           ▁▁▁█▂▁▁▁         mid        ║
+║  * voice-note.wav          ▆█▃▂▁▁▁▁        bass        ║
+║                                                        ║
+╚════════════════════════════════════════════════════════╝
+
+  Tip: cargo run -- 3   (change cluster count)
 ```
 
 ---
 
 ## 9. Understanding the Output
+
+### 9.0 The `[ok]` Line
+
+Each successfully loaded file produces a line like:
+
+```
+  [ok]  voice.wav               48kHz  16b  mono    ▄██▂▂▁▁▁  [bass]
+        │                       │      │    │        │         │
+        filename (24 cols)      │      │    channel  band bar  dominant band
+                                kHz    bit depth
+```
+
+- **`48kHz`** — sample rate divided by 1000, so `48000 Hz → 48kHz`, `44100 Hz → 44kHz`.
+- **`16b`** — bit depth from the WAV header (8, 16, 24, or 32).
+- **`mono` / `stereo` / `multi`** — original channel count before mono mixdown.
+- **band bar** — 8-character spectral fingerprint (see §9.1).
+- **`[dominant-band]`** — the frequency band with the highest average energy for this file.
+
+The filename column is unicode-display-width–padded to exactly 24 columns using the `unicode-width` crate, so box-drawing alignment holds for filenames with multi-byte characters.
 
 ### 9.1 The Band Bar Chart
 
@@ -1110,6 +1159,16 @@ KMeans::params(k)
 - `.mean_axis(Axis(0))` — column means.
 - `.std_axis(Axis(0), 1.0)` — column standard deviations (ddof=1).
 - `.rows_mut()` — mutable row iterator for in-place normalization.
+
+---
+
+### `unicode-width = "0.2.2"`
+
+**Purpose**: Correct terminal display-column counting for Unicode strings.
+
+**Why this matters**: Rust's built-in `{:<N}` format padding counts *bytes*, not display columns. A box-drawing character like `═` or a Unicode filename character may be 2–4 bytes but only 1 display column wide. Using byte-count padding breaks the visual alignment of the terminal box when filenames or band names contain multi-byte characters.
+
+`UnicodeWidthStr::width(s)` returns the number of display columns `s` occupies — respecting full-width CJK characters (2 columns), combining marks (0 columns), and all other Unicode cases. All box helpers (`row()`, `rpad()`, `lpad()`, `center()`) use this for padding arithmetic.
 
 ---
 
@@ -1465,7 +1524,7 @@ For `noise.wav`, all 8 bands have nearly equal energy. The sub-bass band happens
 
 2. **No temporal structure**: The feature vector is the average across all frames. Temporal patterns (rhythm, tempo, note onsets) are completely ignored. Two files with identical average spectral balance but very different rhythms would produce identical feature vectors and be placed in the same cluster.
 
-3. **Only WAV input**: MP3, OGG, FLAC, AAC are not supported. Adding `symphonia` would enable these formats.
+3. **Only WAV input**: MP3, OGG, FLAC, AAC are not supported. Adding `symphonia` would enable these formats. Within WAV: only PCM (8/16/24/32-bit int) and 32-bit float are supported; 64-bit float WAV triggers a clear error with an ffmpeg conversion command.
 
 4. **KMeans instability with small datasets**: With 12 files and k=5, some cluster assignments may vary between runs due to random initialization.
 
