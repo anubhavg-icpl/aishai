@@ -10,17 +10,21 @@ pub struct AudioFile {
 }
 
 pub fn load_wav(path: &Path) -> anyhow::Result<AudioFile> {
-    let mut reader = WavReader::open(path)?;
+    let mut reader = WavReader::open(path).map_err(|e| {
+        // hound rejects 64-bit float WAV with "bits per sample is not 32" before
+        // we can inspect the spec, so enrich that error here.
+        if e.to_string().contains("bits per sample") {
+            anyhow::anyhow!(
+                "64-bit float WAV not supported — convert with ffmpeg:\n  \
+                 ffmpeg -i \"{}\" -acodec pcm_f32le output.wav",
+                path.display()
+            )
+        } else {
+            anyhow::Error::from(e)
+        }
+    })?;
     let spec = reader.spec();
     let channels = spec.channels as usize;
-
-    if spec.sample_format == hound::SampleFormat::Float && spec.bits_per_sample == 64 {
-        anyhow::bail!(
-            "64-bit float WAV not supported — convert with ffmpeg:\n  \
-             ffmpeg -i \"{}\" -acodec pcm_f32le output.wav",
-            path.display()
-        );
-    }
 
     let samples: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?,

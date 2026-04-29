@@ -75,6 +75,9 @@ fn band_bar(bands: &[f32; 8]) -> String {
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let k: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
+    if k == 0 {
+        anyhow::bail!("k must be at least 1  (e.g. cargo run -- 3)");
+    }
 
     let data_dir = PathBuf::from("data");
     if !data_dir.exists() {
@@ -152,8 +155,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let n = feature_rows.len();
-    if n < 2 {
-        anyhow::bail!("Need at least 2 valid WAV files");
+    if n < 3 {
+        anyhow::bail!("Need at least 3 valid WAV files (FastICA requires n_samples > n_components)");
     }
 
     // ── pipeline ───────────────────────────────────────────
