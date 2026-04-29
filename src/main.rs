@@ -122,11 +122,18 @@ fn main() -> anyhow::Result<()> {
                 let feats = features::file_features(&frames, af.sample_rate);
                 let bar = band_bar(&feats);
                 let dom = dominant_band(&feats);
+                let ch_label = match af.channels {
+                    1 => "mono  ",
+                    2 => "stereo",
+                    _ => "multi ",
+                };
                 // unicode-width-aware name column (24 display cols)
                 let line = format!(
-                    "  [ok]  {}  {}Hz  {}  [{}]",
+                    "  [ok]  {}  {}kHz  {}b  {}  {}  [{}]",
                     rpad(&af.name, 24),
-                    af.sample_rate,
+                    af.sample_rate / 1000,
+                    af.bit_depth,
+                    ch_label,
                     bar,
                     dom
                 );

@@ -5,6 +5,8 @@ pub struct AudioFile {
     pub name: String,
     pub samples: Vec<f32>,
     pub sample_rate: u32,
+    pub channels: u16,    // original channel count before mixdown
+    pub bit_depth: u16,   // bits per sample from spec
 }
 
 pub fn load_wav(path: &Path) -> anyhow::Result<AudioFile> {
@@ -12,9 +14,23 @@ pub fn load_wav(path: &Path) -> anyhow::Result<AudioFile> {
     let spec = reader.spec();
     let channels = spec.channels as usize;
 
+    if spec.sample_format == hound::SampleFormat::Float && spec.bits_per_sample == 64 {
+        anyhow::bail!(
+            "64-bit float WAV not supported — convert with ffmpeg:\n  \
+             ffmpeg -i \"{}\" -acodec pcm_f32le output.wav",
+            path.display()
+        );
+    }
+
     let samples: Vec<f32> = match spec.sample_format {
         hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?,
         hound::SampleFormat::Int => {
+            if !matches!(spec.bits_per_sample, 8 | 16 | 24 | 32) {
+                anyhow::bail!(
+                    "unsupported bit depth {}. Supported: 8, 16, 24, 32-bit PCM; 32-bit float",
+                    spec.bits_per_sample
+                );
+            }
             let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
             reader
                 .samples::<i32>()
@@ -43,6 +59,8 @@ pub fn load_wav(path: &Path) -> anyhow::Result<AudioFile> {
             .into_owned(),
         samples: mono,
         sample_rate: spec.sample_rate,
+        channels: spec.channels,
+        bit_depth: spec.bits_per_sample,
     })
 }
 
